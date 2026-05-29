@@ -2,6 +2,10 @@
 
 Local stdio MCP server for Codex. It exposes one read-only tool, `mimo_ask`, which sends caller-provided text to the MiMo Token Plan OpenAI-compatible API.
 
+## Project provenance
+
+This project was built almost entirely by OpenAI Codex / AI assistance, with human review of the safety boundary and repository setup.
+
 ## Install dependencies
 
 ```bash
@@ -89,3 +93,7 @@ This server is intentionally narrow:
 - only processes text passed by the caller;
 - reads `MIMO_TP_KEY` only from the environment;
 - does not save, print, or write the API key to any file.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
