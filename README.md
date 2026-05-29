@@ -139,6 +139,23 @@ python scripts/smoke_test.py
 
 The smoke test reads `MIMO_TP_KEY` from the environment, sends one short prompt, and prints a short result plus usage report. It skips itself if `MIMO_TP_KEY` is not set and never prints the full key.
 
+## GitHub PR review with Sourcery
+
+This repo includes `.sourcery.yaml` for project-level Sourcery settings and a GitHub PR template that reminds authors how to trigger a review.
+
+To enable Sourcery on GitHub:
+
+1. Sign in to Sourcery with GitHub and install the Sourcery GitHub App for this repository or the owning organization: https://app.sourcery.ai/
+2. In Sourcery's GitHub App settings, grant access to this repository.
+3. In Sourcery Review Settings, keep PR Summary, Review Guide, and AI Review Comments enabled. Set the review language to the team's preferred language.
+4. Open a new PR. Sourcery should review it automatically. For an existing PR or a re-review, comment:
+
+```text
+@sourcery-ai review
+```
+
+Use the `sourcery-ignore` label on PRs that should be skipped by Sourcery.
+
 ## Usage report
 
 Successful tool responses append a usage report with tool name, model, input/output character counts, effective `max_tokens`, clamp status, API token usage when reported, and a non-exact credit multiplier hint for common MiMo models.
