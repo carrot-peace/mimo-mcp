@@ -89,3 +89,7 @@ This server is intentionally narrow:
 - only processes text passed by the caller;
 - reads `MIMO_TP_KEY` only from the environment;
 - does not save, print, or write the API key to any file.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
