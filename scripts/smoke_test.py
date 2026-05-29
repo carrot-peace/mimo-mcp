@@ -27,7 +27,7 @@ async def main() -> int:
         print("SKIP: MIMO_TP_KEY is not set; smoke test did not call MiMo.")
         return 0
 
-    result = await mimo_ask(prompt="Reply with a short confirmation that MiMo MCP smoke test works.", max_tokens=128)
+    result = await mimo_ask(prompt="Reply with a short confirmation that MiMo MCP smoke test works.", budget="default")
     if result.startswith("Error:"):
         print(result)
         return 1

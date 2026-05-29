@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 
 import pytest
 
@@ -43,7 +44,14 @@ class FakeAsyncClient:
 
 @pytest.fixture(autouse=True)
 def clean_env(monkeypatch):
-    for name in ("MIMO_TP_KEY", "MIMO_BASE_URL", "MIMO_DEFAULT_MODEL", "MIMO_MAX_INPUT_CHARS"):
+    for name in (
+        "MIMO_TP_KEY",
+        "MIMO_BASE_URL",
+        "MIMO_DEFAULT_MODEL",
+        "MIMO_MAX_INPUT_CHARS",
+        "MIMO_DEFAULT_COMPLETION_BUDGET",
+        "MIMO_LARGE_COMPLETION_BUDGET",
+    ):
         monkeypatch.delenv(name, raising=False)
     FakeAsyncClient.requests = []
     FakeAsyncClient.response = FakeResponse(
@@ -121,14 +129,64 @@ def test_max_input_chars_rejects_when_exceeded(monkeypatch):
     assert FakeAsyncClient.requests == []
 
 
-def test_max_tokens_clamped_and_reported(monkeypatch):
+def test_all_tool_signatures_hide_max_tokens():
+    for name in ("mimo_ask", "mimo_summarize", "mimo_review", "mimo_test_draft", "mimo_compare"):
+        signature = inspect.signature(getattr(server, name))
+        assert "max_tokens" not in signature.parameters
+        assert "budget" in signature.parameters
+
+
+def test_budget_default_uses_default_completion_budget(monkeypatch):
     set_key(monkeypatch)
 
-    result = run(server.mimo_ask(prompt="hello", max_tokens=999999))
+    result = run(server.mimo_ask(prompt="hello", budget="default"))
 
-    assert "- max_tokens: 32768" in result
-    assert "- max_tokens_clamped: true" in result
-    assert FakeAsyncClient.requests[0]["json"]["max_tokens"] == 32768
+    assert "- budget_mode: default" in result
+    assert "- completion_budget: 65536" in result
+    assert FakeAsyncClient.requests[0]["json"]["max_completion_tokens"] == 65536
+    assert "max_tokens" not in FakeAsyncClient.requests[0]["json"]
+
+
+def test_budget_large_uses_large_completion_budget(monkeypatch):
+    set_key(monkeypatch)
+
+    result = run(server.mimo_ask(prompt="hello", budget="large"))
+
+    assert "- budget_mode: large" in result
+    assert "- completion_budget: 131072" in result
+    assert FakeAsyncClient.requests[0]["json"]["max_completion_tokens"] == 131072
+
+
+def test_budget_auto_compare_uses_large(monkeypatch):
+    set_key(monkeypatch)
+
+    result = run(server.mimo_compare(options="A vs B"))
+
+    assert "- budget_mode: auto" in result
+    assert "- completion_budget: 131072" in result
+    assert FakeAsyncClient.requests[0]["json"]["max_completion_tokens"] == 131072
+
+
+def test_invalid_budget_falls_back_to_auto_and_reports(monkeypatch):
+    set_key(monkeypatch)
+
+    result = run(server.mimo_ask(prompt="hello", budget="tiny"))
+
+    assert "- budget_mode: auto" in result
+    assert "- completion_budget: 65536" in result
+    assert "- budget_fallback_used: true" in result
+    assert FakeAsyncClient.requests[0]["json"]["max_completion_tokens"] == 65536
+
+
+def test_invalid_budget_env_falls_back_to_defaults_and_reports(monkeypatch):
+    set_key(monkeypatch)
+    monkeypatch.setenv("MIMO_LARGE_COMPLETION_BUDGET", "not-an-int")
+
+    result = run(server.mimo_compare(options="A vs B"))
+
+    assert "- completion_budget: 131072" in result
+    assert "- env_budget_fallback_used: true" in result
+    assert "- env_budget_fallbacks: MIMO_LARGE_COMPLETION_BUDGET=invalid" in result
 
 
 def test_usage_report_contains_required_fields(monkeypatch):
@@ -141,6 +199,8 @@ def test_usage_report_contains_required_fields(monkeypatch):
     assert "- input_chars: 6" in result
     assert "- output_chars: 11" in result
     assert "- prompt_tokens: 10" in result
+    assert "- completion_tokens: 2" in result
+    assert "- total_tokens: 12" in result
     assert "- usage_source: api_usage" in result
 
 
@@ -197,11 +257,21 @@ def test_common_http_errors_are_clear(monkeypatch, status_code, expected):
 
 def test_empty_api_answer_returns_error(monkeypatch):
     set_key(monkeypatch)
-    FakeAsyncClient.response = FakeResponse({"choices": [{"message": {"content": "   "}}]})
+    FakeAsyncClient.response = FakeResponse(
+        {
+            "choices": [{"finish_reason": "stop", "message": {"content": "   ", "role": "assistant"}}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 0, "total_tokens": 10},
+        }
+    )
 
     result = run(server.mimo_compare(options="A vs B"))
 
-    assert result == "Error: MiMo API returned an empty answer."
+    assert result.startswith("Error: MiMo API returned empty content.")
+    assert "- finish_reason: stop" in result
+    assert "- message_keys: ['content', 'role']" in result
+    assert "- budget_mode: auto" in result
+    assert "- completion_budget: 131072" in result
+    assert "prompt_tokens" in result
 
 
 def test_all_mcp_tools_are_importable():

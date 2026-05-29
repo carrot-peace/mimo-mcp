@@ -13,8 +13,10 @@ from mcp.server.fastmcp import FastMCP
 
 DEFAULT_BASE_URL = "https://token-plan-cn.xiaomimimo.com/v1"
 DEFAULT_MODEL = "mimo-v2.5-pro"
-DEFAULT_MAX_TOKENS = 4096
-MAX_TOKENS_HARD_LIMIT = 32768
+DEFAULT_COMPLETION_BUDGET = 65536
+LARGE_COMPLETION_BUDGET = 131072
+LONG_CONTEXT_CHARS = 20000
+COMPLEX_QUESTION_CHARS = 500
 REQUEST_TIMEOUT_SECONDS = 60.0
 VALID_TASK_TYPES = {
     "summary",
@@ -24,6 +26,7 @@ VALID_TASK_TYPES = {
     "brainstorm",
     "other",
 }
+VALID_BUDGET_MODES = {"auto", "default", "large"}
 
 mcp = FastMCP("mimo-mcp")
 
@@ -95,14 +98,63 @@ def _coerce_model(model: str | None) -> str:
     return model
 
 
-def _coerce_max_tokens(max_tokens: int | None) -> tuple[int, bool, str | None]:
-    if max_tokens is None:
-        return DEFAULT_MAX_TOKENS, False, None
-    if not isinstance(max_tokens, int) or max_tokens <= 0:
-        return DEFAULT_MAX_TOKENS, False, "Error: max_tokens must be a positive integer when provided."
-    if max_tokens > MAX_TOKENS_HARD_LIMIT:
-        return MAX_TOKENS_HARD_LIMIT, True, None
-    return max_tokens, False, None
+def _env_completion_budget(name: str, default: int) -> tuple[int, bool, str | None]:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default, False, None
+    try:
+        value = int(raw.strip())
+    except ValueError:
+        return default, True, f"{name}=invalid"
+    if value <= 0:
+        return default, True, f"{name}=invalid"
+    return value, False, None
+
+
+def _normalize_budget_mode(budget: str) -> tuple[str, bool]:
+    if not isinstance(budget, str):
+        return "auto", True
+    mode = budget.strip().lower()
+    if mode not in VALID_BUDGET_MODES:
+        return "auto", True
+    return mode, False
+
+
+def _auto_budget_mode(tool: str, user_sections: list[tuple[str, str]]) -> str:
+    section_map = dict(user_sections)
+    if tool == "mimo_compare":
+        return "large"
+    if tool == "mimo_summarize" and len(section_map.get("Context", "")) >= LONG_CONTEXT_CHARS:
+        return "large"
+    if tool == "mimo_review":
+        context = section_map.get("Context", "")
+        question = section_map.get("Question", "")
+        if len(context) >= LONG_CONTEXT_CHARS or len(question) >= COMPLEX_QUESTION_CHARS:
+            return "large"
+    return "default"
+
+
+def _resolve_completion_budget(
+    *,
+    tool: str,
+    user_sections: list[tuple[str, str]],
+    budget: str,
+) -> tuple[str, int, bool, list[str]]:
+    requested_mode, budget_fallback_used = _normalize_budget_mode(budget)
+    effective_mode = _auto_budget_mode(tool, user_sections) if requested_mode == "auto" else requested_mode
+    default_budget, default_fallback_used, default_note = _env_completion_budget(
+        "MIMO_DEFAULT_COMPLETION_BUDGET", DEFAULT_COMPLETION_BUDGET
+    )
+    large_budget, large_fallback_used, large_note = _env_completion_budget(
+        "MIMO_LARGE_COMPLETION_BUDGET", LARGE_COMPLETION_BUDGET
+    )
+    env_fallbacks = [
+        note
+        for used, note in ((default_fallback_used, default_note), (large_fallback_used, large_note))
+        if used and note
+    ]
+    completion_budget = large_budget if effective_mode == "large" else default_budget
+    return requested_mode, completion_budget, budget_fallback_used, env_fallbacks
 
 
 def _find_sensitive_categories(texts: Iterable[str]) -> list[str]:
@@ -118,10 +170,12 @@ def _usage_report(
     *,
     tool: str,
     model: str,
+    budget_mode: str,
+    completion_budget: int,
+    budget_fallback_used: bool,
+    env_budget_fallbacks: list[str],
     input_chars: int,
     output_chars: int,
-    max_tokens: int,
-    max_tokens_clamped: bool,
     usage: dict[str, Any] | None,
 ) -> str:
     if model == "mimo-v2.5-pro":
@@ -137,12 +191,16 @@ def _usage_report(
         "usage report:",
         f"- tool: {tool}",
         f"- model: {model}",
+        f"- budget_mode: {budget_mode}",
+        f"- completion_budget: {completion_budget}",
+        f"- budget_fallback_used: {str(budget_fallback_used).lower()}",
+        f"- env_budget_fallback_used: {str(bool(env_budget_fallbacks)).lower()}",
         f"- input_chars: {input_chars}",
         f"- output_chars: {output_chars}",
-        f"- max_tokens: {max_tokens}",
-        f"- max_tokens_clamped: {str(max_tokens_clamped).lower()}",
         f"- estimated_credit_multiplier: {multiplier}",
     ]
+    if env_budget_fallbacks:
+        lines.append(f"- env_budget_fallbacks: {', '.join(env_budget_fallbacks)}")
     if usage:
         lines.extend(
             [
@@ -154,6 +212,40 @@ def _usage_report(
         )
     else:
         lines.append("- usage_source: not_reported")
+    return "\n".join(lines)
+
+
+def _empty_content_diagnostic(
+    *,
+    data: dict[str, Any],
+    message: Any,
+    finish_reason: Any,
+    tool: str,
+    model: str,
+    budget_mode: str,
+    completion_budget: int,
+    budget_fallback_used: bool,
+    env_budget_fallbacks: list[str],
+) -> str:
+    usage = data.get("usage")
+    usage_value: Any = usage if isinstance(usage, dict) else None
+    message_keys = sorted(message.keys()) if isinstance(message, dict) else []
+    lines = [
+        "Error: MiMo API returned empty content.",
+        "diagnostic:",
+        f"- tool: {tool}",
+        f"- model: {model}",
+        f"- finish_reason: {finish_reason}",
+        f"- message_keys: {message_keys}",
+        f"- usage: {usage_value if usage_value is not None else 'not_reported'}",
+        f"- budget_mode: {budget_mode}",
+        f"- completion_budget: {completion_budget}",
+        f"- budget_fallback_used: {str(budget_fallback_used).lower()}",
+        f"- env_budget_fallback_used: {str(bool(env_budget_fallbacks)).lower()}",
+        "- possible_empty_content_source: server_or_model_returned_empty_content",
+    ]
+    if env_budget_fallbacks:
+        lines.append(f"- env_budget_fallbacks: {', '.join(env_budget_fallbacks)}")
     return "\n".join(lines)
 
 
@@ -176,7 +268,7 @@ async def _call_mimo(
     user_sections: list[tuple[str, str]],
     system_prompt: str,
     model: str | None,
-    max_tokens: int | None,
+    budget: str,
 ) -> str:
     if not user_sections or any(not isinstance(value, str) for _, value in user_sections):
         return "Error: all text parameters must be strings."
@@ -190,9 +282,11 @@ async def _call_mimo(
         return "Error: model must be a non-empty string when provided."
     model_name = model_name.strip()
 
-    resolved_max_tokens, max_tokens_clamped, max_tokens_error = _coerce_max_tokens(max_tokens)
-    if max_tokens_error:
-        return max_tokens_error
+    budget_mode, completion_budget, budget_fallback_used, env_budget_fallbacks = _resolve_completion_budget(
+        tool=tool,
+        user_sections=user_sections,
+        budget=budget,
+    )
 
     sensitive_categories = _find_sensitive_categories(required_values)
     if sensitive_categories:
@@ -221,7 +315,7 @@ async def _call_mimo(
     payload = {
         "model": model_name,
         "messages": _build_messages(system_prompt, user_sections),
-        "max_tokens": resolved_max_tokens,
+        "max_completion_tokens": completion_budget,
     }
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
 
@@ -249,16 +343,39 @@ async def _call_mimo(
         return "Error: MiMo API returned a non-JSON response."
 
     try:
-        content = data["choices"][0]["message"]["content"]
+        choice = data["choices"][0]
+        message = choice["message"]
+        content = message["content"]
     except (KeyError, IndexError, TypeError):
         return "Error: MiMo API response did not include choices[0].message.content."
+    finish_reason = choice.get("finish_reason") if isinstance(choice, dict) else None
 
     if not isinstance(content, str):
         if content is None:
-            return "Error: MiMo API returned an empty answer."
+            return _empty_content_diagnostic(
+                data=data,
+                message=message,
+                finish_reason=finish_reason,
+                tool=tool,
+                model=model_name,
+                budget_mode=budget_mode,
+                completion_budget=completion_budget,
+                budget_fallback_used=budget_fallback_used,
+                env_budget_fallbacks=env_budget_fallbacks,
+            )
         content = str(content)
     if not content.strip():
-        return "Error: MiMo API returned an empty answer."
+        return _empty_content_diagnostic(
+            data=data,
+            message=message,
+            finish_reason=finish_reason,
+            tool=tool,
+            model=model_name,
+            budget_mode=budget_mode,
+            completion_budget=completion_budget,
+            budget_fallback_used=budget_fallback_used,
+            env_budget_fallbacks=env_budget_fallbacks,
+        )
 
     usage = data.get("usage")
     if not isinstance(usage, dict):
@@ -266,10 +383,12 @@ async def _call_mimo(
     return content + _usage_report(
         tool=tool,
         model=model_name,
+        budget_mode=budget_mode,
+        completion_budget=completion_budget,
+        budget_fallback_used=budget_fallback_used,
+        env_budget_fallbacks=env_budget_fallbacks,
         input_chars=input_chars,
         output_chars=len(content),
-        max_tokens=resolved_max_tokens,
-        max_tokens_clamped=max_tokens_clamped,
         usage=usage,
     )
 
@@ -280,7 +399,7 @@ async def mimo_ask(
     context: str | None = None,
     task_type: Literal["summary", "review", "test_draft", "explain", "brainstorm", "other"] | None = None,
     model: str | None = None,
-    max_tokens: int | None = None,
+    budget: str = "auto",
 ) -> str:
     """Ask MiMo Token Plan using only caller-provided text."""
     if not isinstance(prompt, str) or not prompt.strip():
@@ -301,7 +420,7 @@ async def mimo_ask(
         user_sections=sections,
         system_prompt=task_line,
         model=model,
-        max_tokens=max_tokens,
+        budget=budget,
     )
 
 
@@ -310,7 +429,7 @@ async def mimo_summarize(
     context: str,
     focus: str | None = None,
     model: str | None = None,
-    max_tokens: int | None = None,
+    budget: str = "auto",
 ) -> str:
     """Summarize long caller-provided context."""
     if not isinstance(context, str) or not context.strip():
@@ -328,7 +447,7 @@ async def mimo_summarize(
             "Separate facts, inferences, uncertainties, and important omissions."
         ),
         model=model,
-        max_tokens=max_tokens,
+        budget=budget,
     )
 
 
@@ -337,7 +456,7 @@ async def mimo_review(
     context: str,
     question: str | None = None,
     model: str | None = None,
-    max_tokens: int | None = None,
+    budget: str = "auto",
 ) -> str:
     """Ask MiMo for a read-only second opinion on risks and gaps."""
     if not isinstance(context, str) or not context.strip():
@@ -355,7 +474,7 @@ async def mimo_review(
             "Do not ask to modify code and do not give a final implementation decision; Codex decides."
         ),
         model=model,
-        max_tokens=max_tokens,
+        budget=budget,
     )
 
 
@@ -364,7 +483,7 @@ async def mimo_test_draft(
     context: str,
     test_goal: str | None = None,
     model: str | None = None,
-    max_tokens: int | None = None,
+    budget: str = "auto",
 ) -> str:
     """Generate test ideas or draft tests from caller-provided context."""
     if not isinstance(context, str) or not context.strip():
@@ -382,7 +501,7 @@ async def mimo_test_draft(
             "Do not assume project APIs that were not provided. Do not write files."
         ),
         model=model,
-        max_tokens=max_tokens,
+        budget=budget,
     )
 
 
@@ -391,7 +510,7 @@ async def mimo_compare(
     options: str,
     criteria: str | None = None,
     model: str | None = None,
-    max_tokens: int | None = None,
+    budget: str = "auto",
 ) -> str:
     """Compare caller-provided options without unsupported claims."""
     if not isinstance(options, str) or not options.strip():
@@ -409,7 +528,7 @@ async def mimo_compare(
             "Mark uncertainty clearly and avoid claims not supported by the provided evidence."
         ),
         model=model,
-        max_tokens=max_tokens,
+        budget=budget,
     )
 
 
