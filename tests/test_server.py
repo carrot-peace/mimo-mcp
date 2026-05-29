@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+from urllib.parse import urlparse
 
 import pytest
 
@@ -51,6 +52,8 @@ def clean_env(monkeypatch):
         "MIMO_MAX_INPUT_CHARS",
         "MIMO_DEFAULT_COMPLETION_BUDGET",
         "MIMO_LARGE_COMPLETION_BUDGET",
+        "MIMO_ALLOW_CUSTOM_BASE_URL",
+        "MIMO_ALLOW_INSECURE_LOCAL_HTTP",
     ):
         monkeypatch.delenv(name, raising=False)
     FakeAsyncClient.requests = []
@@ -69,6 +72,11 @@ def run(coro):
 
 def set_key(monkeypatch):
     monkeypatch.setenv("MIMO_TP_KEY", "test-key-not-a-real-secret")
+
+
+def assert_refused_without_request(result: str):
+    assert result == "Refused: MIMO_BASE_URL is not an approved MiMo endpoint."
+    assert FakeAsyncClient.requests == []
 
 
 def test_missing_mimo_tp_key_returns_clear_error():
@@ -220,12 +228,118 @@ def test_default_model_and_base_url_from_env(monkeypatch):
     set_key(monkeypatch)
     monkeypatch.setenv("MIMO_DEFAULT_MODEL", "mimo-v2.5")
     monkeypatch.setenv("MIMO_BASE_URL", "https://example.test/v1/")
+    monkeypatch.setenv("MIMO_ALLOW_CUSTOM_BASE_URL", "1")
 
     result = run(server.mimo_review(context="review this"))
 
     assert "- model: mimo-v2.5" in result
     assert FakeAsyncClient.requests[0]["url"] == "https://example.test/v1/chat/completions"
     assert FakeAsyncClient.requests[0]["json"]["model"] == "mimo-v2.5"
+
+
+@pytest.mark.parametrize(
+    ("base_url", "expected_url"),
+    [
+        ("https://token-plan-cn.xiaomimimo.com/v1", "https://token-plan-cn.xiaomimimo.com/v1/chat/completions"),
+        ("https://token-plan-sgp.xiaomimimo.com/v1", "https://token-plan-sgp.xiaomimimo.com/v1/chat/completions"),
+        ("https://token-plan-ams.xiaomimimo.com/v1", "https://token-plan-ams.xiaomimimo.com/v1/chat/completions"),
+        ("https://token-plan-cn.xiaomimimo.com/v1/", "https://token-plan-cn.xiaomimimo.com/v1/chat/completions"),
+    ],
+)
+def test_official_base_urls_are_allowed_and_normalized(monkeypatch, base_url, expected_url):
+    set_key(monkeypatch)
+    monkeypatch.setenv("MIMO_BASE_URL", base_url)
+
+    result = run(server.mimo_ask(prompt="hello"))
+
+    assert "MiMo answer" in result
+    assert FakeAsyncClient.requests[0]["url"] == expected_url
+    assert "//chat/completions" not in FakeAsyncClient.requests[0]["url"]
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "https://evil.example/v1",
+        "https://token-plan-cn.xiaomimimo.com.evil.com/v1",
+        "https://token-plan-cn.xiaomimimo.com:443/v1",
+        "http://example.test/v1",
+        "http://localhost:8080/v1",
+        "https://example.test/v1",
+    ],
+)
+def test_unapproved_base_urls_are_refused_by_default(monkeypatch, base_url):
+    set_key(monkeypatch)
+    monkeypatch.setenv("MIMO_BASE_URL", base_url)
+
+    result = run(server.mimo_ask(prompt="hello"))
+
+    assert_refused_without_request(result)
+
+
+@pytest.mark.parametrize(
+    ("base_url", "expected_url"),
+    [
+        ("http://localhost:8080/v1", "http://localhost:8080/v1/chat/completions"),
+        ("http://127.0.0.1:8080/v1", "http://127.0.0.1:8080/v1/chat/completions"),
+        ("http://[::1]:8080/v1", "http://[::1]:8080/v1/chat/completions"),
+    ],
+)
+def test_local_http_requires_insecure_local_opt_in(monkeypatch, base_url, expected_url):
+    set_key(monkeypatch)
+    if base_url.startswith("http://[::1]"):
+        assert urlparse(base_url).hostname == "::1"
+    monkeypatch.setenv("MIMO_BASE_URL", base_url)
+    monkeypatch.setenv("MIMO_ALLOW_INSECURE_LOCAL_HTTP", "1")
+
+    result = run(server.mimo_ask(prompt="hello"))
+
+    assert "MiMo answer" in result
+    assert FakeAsyncClient.requests[0]["url"] == expected_url
+
+
+def test_public_http_is_refused_even_with_opt_ins(monkeypatch):
+    set_key(monkeypatch)
+    monkeypatch.setenv("MIMO_BASE_URL", "http://example.test/v1")
+    monkeypatch.setenv("MIMO_ALLOW_CUSTOM_BASE_URL", "1")
+    monkeypatch.setenv("MIMO_ALLOW_INSECURE_LOCAL_HTTP", "1")
+
+    result = run(server.mimo_ask(prompt="hello"))
+
+    assert_refused_without_request(result)
+
+
+def test_custom_https_requires_custom_base_url_opt_in(monkeypatch):
+    set_key(monkeypatch)
+    monkeypatch.setenv("MIMO_BASE_URL", "https://example.test/v1")
+    monkeypatch.setenv("MIMO_ALLOW_CUSTOM_BASE_URL", "1")
+
+    result = run(server.mimo_ask(prompt="hello"))
+
+    assert "MiMo answer" in result
+    assert FakeAsyncClient.requests[0]["url"] == "https://example.test/v1/chat/completions"
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "https://user@token-plan-cn.xiaomimimo.com/v1",
+        "https://user:pass@token-plan-cn.xiaomimimo.com/v1",
+        "https://token-plan-cn.xiaomimimo.com/v1?x=1",
+        "https://token-plan-cn.xiaomimimo.com/v1#fragment",
+        "https://user@example.test/v1",
+        "https://example.test/v1?x=1",
+        "https://example.test/v1#fragment",
+    ],
+)
+def test_userinfo_query_and_fragment_are_refused_in_all_modes(monkeypatch, base_url):
+    set_key(monkeypatch)
+    monkeypatch.setenv("MIMO_BASE_URL", base_url)
+    monkeypatch.setenv("MIMO_ALLOW_CUSTOM_BASE_URL", "1")
+
+    result = run(server.mimo_ask(prompt="hello"))
+
+    assert_refused_without_request(result)
 
 
 def test_invalid_base_url_returns_error_before_request(monkeypatch):

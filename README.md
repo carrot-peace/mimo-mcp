@@ -28,6 +28,34 @@ python3 -m venv .venv
 
 The default model is `mimo-v2.5-pro`. The default base URL is `https://token-plan-cn.xiaomimimo.com/v1`.
 
+By default, `MIMO_BASE_URL` is restricted to official MiMo Token Plan HTTPS endpoints:
+
+- `https://token-plan-cn.xiaomimimo.com/v1`
+- `https://token-plan-sgp.xiaomimimo.com/v1`
+- `https://token-plan-ams.xiaomimimo.com/v1`
+
+This restriction matters because every API request sends `MIMO_TP_KEY` in the `Authorization` header. If `MIMO_BASE_URL` is misconfigured, polluted, or maliciously redirected to an arbitrary host, the key could be leaked to that host.
+
+To switch official regions, set `MIMO_BASE_URL` to one of the official URLs above. The server accepts `/v1` and `/v1/` and normalizes requests to `/v1/chat/completions`.
+
+Custom HTTPS endpoints are blocked unless explicitly enabled:
+
+```bash
+export MIMO_ALLOW_CUSTOM_BASE_URL=1
+export MIMO_BASE_URL="https://your-token-plan-compatible-endpoint.example/v1"
+```
+
+Custom endpoints still must use `https` and must not include username/password, query strings, or fragments.
+
+Local HTTP is blocked by default. For local development only, you may enable HTTP for `localhost`, `127.0.0.1`, or `::1`:
+
+```bash
+export MIMO_ALLOW_INSECURE_LOCAL_HTTP=1
+export MIMO_BASE_URL="http://localhost:8080/v1"
+```
+
+Public HTTP endpoints are always refused.
+
 For fish shell:
 
 ```fish
@@ -37,6 +65,8 @@ set -Ux MIMO_DEFAULT_MODEL "mimo-v2.5-pro"
 set -Ux MIMO_MAX_INPUT_CHARS 0
 set -Ux MIMO_DEFAULT_COMPLETION_BUDGET 65536
 set -Ux MIMO_LARGE_COMPLETION_BUDGET 131072
+set -Ux MIMO_ALLOW_CUSTOM_BASE_URL 0
+set -Ux MIMO_ALLOW_INSECURE_LOCAL_HTTP 0
 ```
 
 `MIMO_MAX_INPUT_CHARS=0` means no local character limit. If it is set to a positive integer, tool calls larger than that are rejected instead of being truncated.
@@ -56,9 +86,11 @@ launchctl setenv MIMO_DEFAULT_MODEL "mimo-v2.5-pro"
 launchctl setenv MIMO_MAX_INPUT_CHARS "0"
 launchctl setenv MIMO_DEFAULT_COMPLETION_BUDGET "65536"
 launchctl setenv MIMO_LARGE_COMPLETION_BUDGET "131072"
+launchctl setenv MIMO_ALLOW_CUSTOM_BASE_URL "0"
+launchctl setenv MIMO_ALLOW_INSECURE_LOCAL_HTTP "0"
 ```
 
-Then fully quit and restart Codex App. MCP tool lists are loaded at startup, so config changes may not appear until Codex App is restarted.
+Then fully quit and restart Codex App. MCP tool lists and MCP server environment allowlists are loaded at startup, so config or environment changes may not appear until Codex App is restarted.
 
 To remove values later:
 
@@ -69,6 +101,8 @@ launchctl unsetenv MIMO_DEFAULT_MODEL
 launchctl unsetenv MIMO_MAX_INPUT_CHARS
 launchctl unsetenv MIMO_DEFAULT_COMPLETION_BUDGET
 launchctl unsetenv MIMO_LARGE_COMPLETION_BUDGET
+launchctl unsetenv MIMO_ALLOW_CUSTOM_BASE_URL
+launchctl unsetenv MIMO_ALLOW_INSECURE_LOCAL_HTTP
 ```
 
 ## Codex config
@@ -87,6 +121,8 @@ env_vars = [
   "MIMO_MAX_INPUT_CHARS",
   "MIMO_DEFAULT_COMPLETION_BUDGET",
   "MIMO_LARGE_COMPLETION_BUDGET",
+  "MIMO_ALLOW_CUSTOM_BASE_URL",
+  "MIMO_ALLOW_INSECURE_LOCAL_HTTP",
 ]
 startup_timeout_sec = 10
 tool_timeout_sec = 60
