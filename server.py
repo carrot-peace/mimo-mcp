@@ -27,6 +27,14 @@ VALID_TASK_TYPES = {
     "other",
 }
 VALID_BUDGET_MODES = {"auto", "default", "large"}
+APPROVED_MIMO_HOSTS = {
+    "token-plan-cn.xiaomimimo.com",
+    "token-plan-sgp.xiaomimimo.com",
+    "token-plan-ams.xiaomimimo.com",
+}
+LOCAL_HTTP_HOSTS = {"localhost", "127.0.0.1", "::1"}
+BASE_URL_REFUSED_ERROR = "Refused: MIMO_BASE_URL is not an approved MiMo endpoint."
+BASE_URL_INVALID_ERROR = "Error: MIMO_BASE_URL must be a valid http or https URL."
 
 mcp = FastMCP("mimo-mcp")
 
@@ -76,12 +84,44 @@ def _env_base_url() -> str:
     return os.environ.get("MIMO_BASE_URL") or DEFAULT_BASE_URL
 
 
-def _chat_completions_url() -> str | None:
+def _env_flag_enabled(name: str) -> bool:
+    return os.environ.get(name) == "1"
+
+
+def _normalized_base_path(path: str) -> str | None:
+    if path in {"/v1", "/v1/"}:
+        return "/v1"
+    return None
+
+
+def _chat_completions_url() -> tuple[str | None, str | None]:
     base_url = _env_base_url().strip()
     parsed = urlparse(base_url)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        return None
-    return base_url.rstrip("/") + "/chat/completions"
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc or not parsed.hostname:
+        return None, BASE_URL_INVALID_ERROR
+    try:
+        port = parsed.port
+    except ValueError:
+        return None, BASE_URL_INVALID_ERROR
+    if parsed.username or parsed.password or parsed.query or parsed.fragment:
+        return None, BASE_URL_REFUSED_ERROR
+
+    normalized_path = _normalized_base_path(parsed.path)
+    if normalized_path is None:
+        return None, BASE_URL_REFUSED_ERROR
+
+    host = parsed.hostname
+    if parsed.scheme == "https":
+        official_endpoint = host in APPROVED_MIMO_HOSTS and port is None
+        if official_endpoint or _env_flag_enabled("MIMO_ALLOW_CUSTOM_BASE_URL"):
+            netloc = parsed.netloc
+            return f"https://{netloc}{normalized_path}/chat/completions", None
+        return None, BASE_URL_REFUSED_ERROR
+
+    if _env_flag_enabled("MIMO_ALLOW_INSECURE_LOCAL_HTTP") and host in LOCAL_HTTP_HOSTS:
+        netloc = parsed.netloc
+        return f"http://{netloc}{normalized_path}/chat/completions", None
+    return None, BASE_URL_REFUSED_ERROR
 
 
 def _input_limit() -> int:
@@ -308,9 +348,9 @@ async def _call_mimo(
             "launchctl setenv MIMO_TP_KEY '<your-token-plan-key>' before starting Codex."
         )
 
-    api_url = _chat_completions_url()
+    api_url, base_url_error = _chat_completions_url()
     if api_url is None:
-        return "Error: MIMO_BASE_URL must be a valid http or https URL."
+        return base_url_error or BASE_URL_INVALID_ERROR
 
     payload = {
         "model": model_name,
