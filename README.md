@@ -1,4 +1,10 @@
-# MiMo MCP v0.4
+# MiMo MCP
+
+Read-only MiMo Token Plan MCP toolbox for Codex.
+
+[![Tests](https://github.com/carrot-peace/mimo-mcp/actions/workflows/tests.yml/badge.svg)](https://github.com/carrot-peace/mimo-mcp/actions/workflows/tests.yml)
+
+Current version: v0.4.1
 
 Local stdio MCP server for Codex. It exposes a read-only toolbox that sends caller-provided text to the MiMo Token Plan OpenAI-compatible API.
 
@@ -12,7 +18,9 @@ Local stdio MCP server for Codex. It exposes a read-only toolbox that sends call
 
 All tools only process text arguments passed by the caller. The MCP server does not read project files, write files, execute commands, scan projects, or apply patches.
 
-v0.4 removes the public `max_tokens` parameter from all tools. Codex should not directly control MiMo output limits with a low `max_tokens` value, because that can silently compress the auxiliary model's answer and make review or summary output less useful. The MCP server now owns completion budgeting and sends `max_completion_tokens` to the OpenAI-compatible API.
+v0.4 introduced server-managed completion budgeting and removed the public `max_tokens` parameter from all tools. Codex should not directly control MiMo output limits with a low `max_tokens` value, because that can silently compress the auxiliary model's answer and make review or summary output less useful. The MCP server now owns completion budgeting and sends `max_completion_tokens` to the OpenAI-compatible API.
+
+v0.4.1 hardened `MIMO_BASE_URL` validation so the server only uses official MiMo Token Plan HTTPS endpoints by default, with explicit opt-in flags for custom HTTPS and local HTTP development endpoints.
 
 Every tool accepts `budget="auto"`, `budget="default"`, or `budget="large"`. The default completion budget is `65536`; the large budget is `131072`. In `auto` mode, long summaries, long or complex reviews, and comparisons can use the large budget. Invalid budget values fall back to `auto` and are reported in the usage report.
 
@@ -175,19 +183,53 @@ The tool should return an error listing matched rule categories without echoing 
 
 ## Tests
 
-Run unit tests:
+Run unit tests with the project virtual environment:
 
 ```bash
-python -m pytest
+.venv/bin/python -m pytest
 ```
 
-Run the smoke test:
+Run the smoke test only when you intend to make a real MiMo API call:
 
 ```bash
-python scripts/smoke_test.py
+.venv/bin/python scripts/smoke_test.py
 ```
 
-The smoke test reads `MIMO_TP_KEY` from the environment, sends one short prompt, and prints a short result plus usage report. It skips itself if `MIMO_TP_KEY` is not set and never prints the full key.
+The smoke test reads `MIMO_TP_KEY` from the environment. If `MIMO_TP_KEY` is not set, it exits cleanly with `SKIP: MIMO_TP_KEY is not set; smoke test did not call MiMo.` and does not call the API. If the key is set, it sends one short prompt to the real MiMo API and prints a short result plus usage report. It never prints the full key.
+
+If you are not using the project virtual environment, install test dependencies first and run an equivalent Python interpreter explicitly.
+
+## Suggested GitHub metadata
+
+Suggested description:
+
+```text
+Read-only MiMo Token Plan MCP toolbox for Codex
+```
+
+Suggested topics:
+
+```text
+mcp
+codex
+mimo
+xiaomi-mimo
+llm-tools
+python
+```
+
+After authenticating `gh`, the repository metadata can be updated with:
+
+```bash
+gh repo edit carrot-peace/mimo-mcp \
+  --description "Read-only MiMo Token Plan MCP toolbox for Codex" \
+  --add-topic mcp \
+  --add-topic codex \
+  --add-topic mimo \
+  --add-topic xiaomi-mimo \
+  --add-topic llm-tools \
+  --add-topic python
+```
 
 ## Usage report
 
